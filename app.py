@@ -3,150 +3,135 @@ from flask_cors import CORS
 import joblib
 import os
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 app = Flask(__name__)
 CORS(app)
 
-# --- 1. Load AI Models Safely ---
+# --- Load Models ---
 base_path = os.path.dirname(os.path.abspath(__file__))
 model_path = os.path.join(base_path, "phishing_model.pkl")
 vectorizer_path = os.path.join(base_path, "vectorizer.pkl")
 
 try:
-    if os.path.exists(model_path) and os.path.exists(vectorizer_path):
-        model = joblib.load(model_path)
-        vectorizer = joblib.load(vectorizer_path)
-        print("✅ AI Engine Online: Models Loaded successfully.")
-    else:
-        model = None
-        vectorizer = None
-        print("❌ ERROR: Model files (.pkl) not found in BACKEND folder.")
-except Exception as e:
+    model = joblib.load(model_path)
+    vectorizer = joblib.load(vectorizer_path)
+except:
     model = None
     vectorizer = None
-    print(f"❌ ERROR: Could not load models: {e}")
 
-# --- 2. Detection Configuration ---
-legitimate_sites = ["google.com", "wikipedia.org", "apple.com", "amazon.com", "microsoft.com","aceec.ac.in"]
-high_risk_keywords = ["movierulz", "free-movies", "torrent", "cracked", "login-verify","go0gle","faceb0ok"]
-risky_tlds = [".theater", ".xyz", ".tk", ".ml", ".ga", ".cf", ".gq", ".pw", ".top"]
-trusted_brands = ["whatsapp", "facebook", "paypal", "instagram", "bank", "netflix"]
+# --- Detection Lists ---
+legitimate_sites = ["google.com", "wikipedia.org", "apple.com", "amazon.com", "microsoft.com"]
+high_risk_keywords = ["movierulz", "free", "verify", "login", "secure", "account", "update", "bank"]
+risky_tlds = [".xyz", ".tk", ".ml", ".ga", ".cf", ".gq", ".pw", ".top", ".click", ".ru", ".info"]
+trusted_brands = ["google", "facebook", "amazon", "netflix", "paypal", "instagram", "bank", "microsoft", "icici", "axis"]
 
-# --- 3. Root Route (for testing on browser) ---
+# --- Helper Function ---
+def extract_features(url):
+    parsed = urlparse(url)
+    domain = parsed.netloc
+
+    features = []
+
+    # Length
+    features.append(len(url))
+
+    # Special chars
+    features.append(url.count('-'))
+    features.append(url.count('@'))
+    features.append(url.count('?'))
+    features.append(url.count('%'))
+    features.append(url.count('.'))
+
+    # Suspicious patterns
+    features.append(1 if '//' in url[8:] else 0)
+    features.append(1 if '@' in url else 0)
+    features.append(1 if '%00' in url else 0)
+
+    return features
+
 @app.route("/")
 def home():
-    return "Phishing Detection API is Running 🚀"
+    return "Backend running on Render"
 
-# --- 4. Main Analyze Route ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
         data = request.get_json()
-        if not data or "url" not in data:
-            return jsonify({"status": "No URL provided ❌", "score": 0, "reasons": ["Empty request sent."]}), 400
-            
-        url = data.get("url", "").lower().strip()
+        url = data.get("url", "").strip().lower()
 
-        # A. Basic Validation
-        if not url.startswith("http") or "." not in url or len(url) < 8:
-            return jsonify({
-                "status": "Invalid URL ❌", 
-                "score": 0, 
-                "reasons": ["Please enter a full URL starting with http:// or https://"]
-            })
+        if not url.startswith("http"):
+            return jsonify({"status": "Invalid URL ❌", "score": 0, "reasons": ["Enter valid URL"]})
 
+        url = unquote(url)
         parsed = urlparse(url)
         domain = parsed.netloc
 
-        # 🔥 FIXED: Proper whitelist (no substring mistake)
-        if domain in legitimate_sites:
-            return jsonify({
-                "status": "Legitimate ✅", 
-                "score": 0, 
-                "reasons": ["Verified Trusted Domain"]
-            })
-
         reasons = []
-        h_score = 0
+        score = 0
 
-        # --- NEW IMPORTANT TEST CASE HANDLING ---
+        # --- 1. Suspicious patterns (IMPORTANT for your test cases) ---
+        if '@' in url:
+            reasons.append("Contains @ symbol (phishing trick)")
+            score += 90
 
-        # 1. Double dots
-        if ".." in url:
-            reasons.append("Invalid domain format (double dots)")
-            h_score += 85
+        if '%00' in url:
+            reasons.append("Contains encoded characters (%00 attack)")
+            score += 90
 
-        # 2. @ symbol
-        if "@" in url:
-            reasons.append("Detected '@' symbol masking")
-            h_score += 90
+        if '//' in url[8:]:
+            reasons.append("Double slash redirection detected")
+            score += 80
 
-        # 3. Too many subdomains
-        if domain.count('.') >= 3:
-            reasons.append("Excessive subdomains (possible spoofing)")
-            h_score += 70
+        # --- 2. Fake domain trick ---
+        if any(brand in domain and not domain.endswith(f"{brand}.com") for brand in trusted_brands):
+            reasons.append("Brand impersonation detected")
+            score += 95
 
-        # 4. IP address detection
-        if re.search(r"\d+\.\d+\.\d+\.\d+", domain):
-            reasons.append("IP address used instead of domain")
-            h_score += 80
+        # --- 3. Risky TLD ---
+        if any(domain.endswith(tld) for tld in risky_tlds):
+            reasons.append("Suspicious domain extension")
+            score += 80
 
-        # --- EXISTING LOGIC ---
+        # --- 4. Keywords ---
+        if any(word in url for word in high_risk_keywords):
+            reasons.append("Contains phishing keywords")
+            score += 70
 
-        # High-Risk Keywords
-        if any(kw in url for kw in high_risk_keywords):
-            reasons.append("Contains high-risk/piracy keywords")
-            h_score += 85
-
-        # High-Risk TLDs
-        if any(url.endswith(tld) or f"{tld}/" in url for tld in risky_tlds):
-            reasons.append("Unusual or high-risk domain extension")
-            h_score += 80
-
-        # Brand Impersonation
-        for brand in trusted_brands:
-            if brand in url and not (url.endswith(f"{brand}.com") or url.endswith(f"{brand}.org")):
-                reasons.append(f"Potential {brand.capitalize()} Impersonation")
-                h_score += 90
-
-        # --- AI Prediction ---
-        ml_prob = 0
+        # --- 5. ML Model ---
+        ml_score = 0
         if model and vectorizer:
             try:
-                url_vec = vectorizer.transform([url])
-                ml_prob = model.predict_proba(url_vec)[0][1] * 100
-            except Exception as e:
-                print(f"AI Transform Error: {e}")
+                vec = vectorizer.transform([url])
+                ml_score = model.predict_proba(vec)[0][1] * 100
+            except:
+                pass
 
-        # --- Final Score ---
-        final_score = max(ml_prob, h_score)
-        if final_score > 100: 
+        final_score = max(score, ml_score)
+        if final_score > 100:
             final_score = 100
 
         # --- Final Status ---
-        if final_score > 75: 
+        if final_score > 75:
             status = "Phishing 🚨"
-        elif final_score > 45: 
+        elif final_score > 45:
             status = "Suspicious ⚠️"
-        else: 
+        else:
             status = "Legitimate ✅"
 
         return jsonify({
             "status": status,
             "score": round(final_score, 2),
-            "reasons": reasons if reasons else ["No major anomalies detected."]
+            "reasons": reasons if reasons else ["No major issues"]
         })
 
     except Exception as e:
-        print(f"⚠️ Server Crash Prevented: {e}")
         return jsonify({
-            "status": "Analysis Error ❌", 
-            "score": 0, 
-            "reasons": ["Internal engine error occurred."]
+            "status": "Error ⚠️",
+            "score": 0,
+            "reasons": ["Server error"]
         }), 500
 
 
-# --- 5. Render Deployment Run ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run()
