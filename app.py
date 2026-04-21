@@ -15,8 +15,7 @@ vectorizer_path = os.path.join(base_path, "vectorizer.pkl")
 
 try:
   model = joblib.load(model_path)
-  vectorizer = joblib.load(vectorizer_path)
-  
+  vectorizer = joblib.load(vectorizer_path)  
 except:
     model = None
     vectorizer = None
